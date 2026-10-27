@@ -1,6 +1,6 @@
 # tangguoyuhome 架构设计文档
 
-> 版本：v0.6 ｜ 日期：2026-10-27
+> 版本：v0.7 ｜ 日期：2026-10-27
 > v0.6 变更：dsh-bili-whale 已定位并查证——B站通道存在（owner-only 私信收发+监听，硬编码克制限制），§4/§8.4 修正，B站从"需自建"改为"有现成插件可适配"。
 > v0.5 变更：新增群聊机制设计（§8.5）：QQ 群经提审上线可用、微信 iLink 仅私聊；群内触发/人设分层/记忆隔离/隐私边界。
 > v0.4 变更：针对"DSH 会话上下文有上限"的约束，引入 memlikehuman（本地 MCP 记忆服务，预算化恢复 + 压缩前交接）作为结构化记忆层；新增 §6.5 上下文上限策略。
@@ -22,51 +22,36 @@
 
 ---
 
-## 2. 核心设计决策（先看这个）
+## 2. 核心设计决策（v0.7 修正）
 
-| # | 决策 | 理由 |
-|---|------|------|
-| D1 | **全插件化**：不自建网关/核心服务，通道、审批、记忆全部复用 DSH 生态插件 | 生态已覆盖全部关键环节（§4），自建等于重复造轮子 |
-| D2 | **人设 = DSH Agent 预设**：她的人格封装为一个 agent preset，所有通道的 session 都挂这个预设 | 人设一致性的机制保障：人格只有一份，与通道无关 |
-| D3 | **记忆 = tangguoyuhome 工作区文件**：所有通道 session 的 cwd 指向同一工作区，人设/记忆/日记都在里面 | 跨平台无缝的实现基础；纯文本可审阅可手改 |
-| D4 | QQ 用 dsh-qq-bridge（官方机器人 API）；微信用 deepseek-harness-weixin（官方 iLink/ClawBot）；抖音/B站等未来平台用 dsh-im 扩展点自建 channel | 见 §8 各节 |
-| D5 | 回复路由默认 source-follow（哪来哪回）；主动消息保守限量 | 官方通道主动消息均有平台限额，需实测 |
-| D6 | 原"自建 Gateway + SQLite 记忆层"设计降级为备选方案（附录 A），仅在插件路线被证伪时启用 | 保留设计资产，避免锁死 |
+前版“各平台独立 session + 同 cwd”不满足所有 App 共用一个 DSH 会话的要求。共享目录不会自动同步实时上下文，不能以日记代替统一会话。
 
----
+| 决策 | 实施约束 |
+|---|---|
+| 主人跨平台私聊统一 | 经明确绑定的平台身份统一到 owner-private 逻辑作用域与一个活动 DSH session；不是每个平台各建一个 |
+| 增加薄适配层 | 复用渠道协议实现，改造其会话寻址和消息提交；不是仅配置 preset/cwd |
+| 串行入站 | 按逻辑作用域排队，先持久化消息与来源，再提交给 Agent；回复绑定该轮原始渠道，禁止靠“最近平台”判断 |
+| 身份绑定 | 平台、机器人账号、发送者三者均匹配白名单；禁止根据昵称自动认定同一主人 |
+| 持久绑定 | 保存逻辑作用域、实际 sessionId、generation、cwd、preset、权限与处理状态；恢复失败不能盲目新建覆盖 |
+| 群聊隔离 | 每群独立 session、独立工作区与独立记忆存储；不开放私聊 MCP/文件/凭据，不能只依赖提示词或项目标签 |
+| 外部记忆 | memlikehuman 保存可见文本并预算化恢复；捕获必须覆盖入站消息的真实 source.kind，接入后实测 |
+| 权限 | 私聊先最小权限，群聊默认无执行工具；不直接采用 B站 README 的 danger-full-access |
 
-## 3. 总体架构（插件生态版）
+## 3. 总体架构（目标，不代表已接入）
 
-```
-┌─────────────────────────── 平台侧 ───────────────────────────┐
-│  QQ 官方机器人API     微信 iLink/ClawBot      抖音/B站(未来)  │
-└───────┬─────────────────────┬──────────────────────┬─────────┘
-        ▼                     ▼                      ▼
-┌───────────────┐  ┌────────────────────┐  ┌───────────────────────┐
-│ dsh-qq-bridge │  │ deepseek-harness-  │  │ 自建 channel           │
-│  QQ 通道插件   │  │ weixin 微信通道插件 │  │ (dsh-im 扩展点, §8.4)  │
-└───────┬───────┘  └─────────┬──────────┘  └───────────┬───────────┘
-        └────────────────────┼─────────────────────────┘
-                             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│              DeepSeek Harness (dsh web, Ubuntu 已有)             │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │ Agent 预设「她」(D2)                                       │  │
-│  │   每个平台的每个对话 ↔ 一个独立持久 session                │  │
-│  │   所有 session: agentPreset=她, cwd=~/tangguoyuhome        │  │
-│  └───────────────────────────────────────────────────────────┘  │
-│  可选增强插件: dsh-mnemon(跨会话分层记忆) / billion-context(压缩)│
-└──────────────────────────────┬──────────────────────────────────┘
-                               ▼
-                  ~/tangguoyuhome/   ← 人设与记忆的唯一真相源 (D3)
-                  ├── AGENTS.md               读写规则约定
-                  ├── persona/SOUL.md         人设档案
-                  ├── memory/MEMORY.md        长期事实记忆
-                  ├── memory/diary/<日期>.md  日记式滚动记忆
-                  └── state/now.md            当前状态(心情/近况)
+```text
+QQ / 微信 / B站协议适配器
+    → 认证与主人身份绑定
+    → 统一 SessionBinding + 每作用域串行队列 + 持久消息去重
+    → owner-private 唯一活动 DSH session
+    → 该轮 source-follow 回复
+                  ↓
+        memlikehuman 原文捕获 / 压缩交接 / 预算恢复
+
+每个允许的群 → 独立队列、session、工作区和独立记忆服务
 ```
 
-关键机制：**各通道 session 的对话记录是独立的，但它们共享同一个工作区**。她在微信里看不到 QQ 的逐字消息，能看到的是 QQ 段对话写进工作区的日记与记忆——所以"跨平台无缝"的程度取决于 §6 的读写约定执行质量（可用 dsh-mnemon 增强）。
+上下文窗口限制和持久 session 日志不是同一概念。同一个活动 session 允许正常压缩；仅在宿主确有必要重建时增加 generation，先保存交接，再恢复外部记忆。检索与摘要可能遗漏细节，不承诺“无损记忆”。
 
 ---
 
@@ -145,24 +130,21 @@ identity 概念模型（逻辑层，不再建表）：
 
 ### 6.5 上下文上限策略（直接回应"DSH 会话有上限"）
 
-先澄清一个前提：各通道插件的模型是**每个平台对话 ↔ 一个独立持久 session**（dsh-qq-bridge / weixin 均如此），所以并不是所有 App 挤在同一个会话上下文里——QQ 的上下文增长不会消耗微信的预算。但每个 session 各自的上下文**确实会封顶触发压缩**，她的连续感必须不依赖"旧原文还在上下文里"。三层防线：
+目标为主人全部 App 私聊进入同一个活动会话；原插件默认各自创建会话只是待适配现状，不是需求变更。
 
-1. **记忆在会话外**：人设/事实/日记存于 tangguoyuhome 工作区文件 + memlikehuman 库，压缩只影响会话内原文，不影响外部记忆。沿用三约定："压缩摘要算依据 / 需要原文去检索 / 看不到旧原文≠记忆丢失"。
-2. **压缩前交接**：接入 memlikehuman 的 Harness 自动捕获插件——可见文本自动落盘，**写入失败时阻止压缩**，重启后增量续传。这是防"压缩吃掉关键信息"的机制保障。
-3. **预算化恢复**：每段对话遵循 memlikehuman 约定——固定 `persona_id`/`project_id`，**先恢复（按 token 预算组装恢复包，而非整库注入），再对话，结束记录**；需要原话时再 `memory_read` 翻日记原文。
-
-由此"会话上限"从风险变成常态机制：她的长期连续性由外部记忆承载，单个 session 压缩/重建无损人设与关系状态。
+1. 会话外保存可见文本，固定 persona_id=tangguoyu、project_id=owner-private。
+2. memlikehuman-host 必须单独安装，并替换而非并行叠加 stock compaction-basic。当前依赖精确 @deepseek-ai/dsh-compaction-basic 0.2.1-rc.3；目标 DSH 版本不匹配时不得直接加载。
+3. 压缩前后持久化原文、摘要和 checkpoint；写入失败应阻止该压缩路径继续。普通异步捕获存在故障窗口，不能承诺零丢失。
+4. 恢复只带预算内内容，详情按需检索原文。自动捕获不等于自动提炼，不配置 API 也能离线保存与关键词检索。
+5. 原文限于插件认可的可见文本；媒体、工具内容和历史缺失不保证覆盖。真实宿主全部压缩路径仍须验收。
 
 ---
 
 ## 7. 跨平台无缝的实现机制
 
-1. **共享工作区**（核心）：一切平台 session cwd=~/tangguoyuhome，记忆互通。
-2. **平台标注**：日记/记忆条目带平台标签，她知道哪段发生在哪。
-3. **人设提示内声明**："你在多平台有号，记忆存在同一个家里"——允许她自然跨平台引用（"你在 QQ 不是说要睡了？"）。
-4. **回复路由**：source-follow（插件天然行为）。跨平台主动追消息（"你 QQ 不回我我来微信找你"）属 P2，受各平台主动消息限额约束，需单独设计冷却。
+统一私聊 session 保留跨平台逐轮上下文；工作区与外部记忆只负责持久化及压缩恢复，不能代替统一寻址。新渠道必须接入 §2 的身份绑定、队列与路由契约，禁止同时启动原插件自动应答造成双回复。
 
-**诚实的局限**：跨平台共享的是日记/记忆（信息级），不是逐字对话原文（ transcript 级）。若实测"她接不上 QQ 刚聊的细节"，增强路径：memlikehuman 结构化记忆（P1 即引入）→ dsh-mnemon 跨会话检索 → 仍不足再考虑附录 A 的自建核心层。
+上线前验证：QQ 输入信息后微信可直接续聊；并发消息不串回复；重复投递不重复触发；重启恢复原 session；记忆写入失败时压缩不继续；群聊无法读取私聊文件或记忆服务。
 
 ---
 
@@ -171,12 +153,12 @@ identity 概念模型（逻辑层，不再建表）：
 ### 8.1 QQ（P0）— dsh-qq-bridge
 
 - 接入：QQ 开放平台（q.qq.com）注册机器人 → appId/clientSecret → `dsh plugin --profile web add dsh-qq-bridge` → `~/.dsh/qq-bridge/config.json`：`allowUsers=[大号]`，workspace 指向 tangguoyuhome，`sandbox: true` 起步。
-- 约束：机器人账号（资料页有标识，非真人号质感）；**主动私聊受平台限额**、被动回复有窗口期（P0 实测）；群聊需提审上线（本项目不用）。
+- 约束：机器人账号（资料页有标识，非真人号质感）；**主动私聊受平台限额**、被动回复有窗口期（P0 实测）；群聊需提审上线（后续群聊阶段需要）。
 - 备选（真人小号质感）：NapCat/OneBot 真人小号路线，见附录 A。决策点：官方限额 vs 真人质感。
 
 ### 8.2 微信（P1）— deepseek-harness-weixin
 
-- 通道性质：**腾讯官方 iLink/ClawBot 协议 + 扫码授权**（协议源自腾讯 MIT 开源的 Tencent/openclaw-weixin）。不是灰色协议，无传统意义的封号风险。
+- 通道性质：**腾讯官方 iLink/ClawBot 协议 + 扫码授权**（协议源自腾讯 MIT 开源的 Tencent/openclaw-weixin）。采用仓库声明的 iLink 协议路线；仍受账号资格、平台规则、限流和风控影响，不承诺零封号风险。
 - **硬性前提**：微信小号需有 ClawBot 入口（微信 → 我 → 设置 → 插件 → ClawBot）。该功能腾讯**灰度放量中**，没入口就只能等资格——P1 第一步就是检查小号资格。
 - 接入：`dsh plugin --profile web add github:sliverp/DeepSeek-harness-weixin` → `dsh plugin --profile web exec dsh-weixin login --wait` 扫码 → 配置 `agentPreset=她`、`cwd=~/tangguoyuhome`、`allowFrom=[你]`。
 - 能力：仅私聊；文本/语音转写/加密图片文件收发；会话内 /approve 工具审批。
@@ -193,17 +175,17 @@ identity 概念模型（逻辑层，不再建表）：
 
 ```
 1. 查生态：awesome-dsh-plugin 列表 / npm 搜 "dsh <平台名>"
-   → 有现成 channel 插件？装上，配 agentPreset + cwd，完成。
+   → 有现成 channel 插件？先核对会话 API，再接入统一 SessionBinding；仅配 preset/cwd 不够。
 2. 没有现成 → 基于 dsh-im 自建 channel：
    a. 实现平台驱动（官方 API 优先 > 协议端 > UI 自动化）
    b. 注册: ctx.im.registerChannel({ platform, send, sendFile })
    c. 入站: 过滤白名单后 ctx.im.dispatchInbound({ platform, chatId, userId, text, ... })
    d. 回调: ctx.im.handleCallback(...)（审批按钮等）
    → 自动获得 dsh-im 的会话映射/命令/渲染/通知/审批能力
-3. 配 agentPreset=她 + cwd=~/tangguoyuhome → 人设与记忆即时生效
+3. 统一身份、session 寻址、队列、回复路由、preset 和工作区 → 完成集成验收后启用
 ```
 
-**关于 B站——dsh-bili-whale 已查证可用**：[Alterssss/dsh-bili-whale](https://github.com/Alterssss/dsh-bili-whale) 不只是内容插件，它带一条**刻意做窄的 B站私信通道**：发信硬编码三条限制（每天只锁定 1 个收信人、只发配置里的 owner.mid、必须互关 `relation.attribute=6`），收信靠 20 秒轮询监听主人私信会话（陌生人/系统通知一律忽略，空闲零 token）。对她的 B站小号 ↔ 你的大号这一场景，能力刚好覆盖。接入要点：
+**关于 B站——已核对源码，未做平台实测**：[Alterssss/dsh-bili-whale](https://github.com/Alterssss/dsh-bili-whale) 不只是内容插件，它带一条**刻意做窄的 B站私信通道**：发信硬编码三条限制（每天只锁定 1 个收信人、只发配置里的 owner.mid、必须互关 `relation.attribute=6`），收信靠 20 秒轮询监听主人私信会话（陌生人/系统通知一律忽略，空闲零 token）。对她的 B站小号 ↔ 你的大号这一场景，能力刚好覆盖。接入要点：
 
 - 用**她的小号**的 cookie（SESSDATA/bili_jct/buvid3，F12 手动复制）；小号需先关注你的大号达成互关。
 - 插件人设空白（自称/称呼/性格/红线由你写）→ 把 SOUL.md 的人设内容喂给它，与全局人设对齐。
@@ -213,7 +195,7 @@ identity 概念模型（逻辑层，不再建表）：
 
 ### 8.5 群聊机制（可扩展支持）
 
-**平台支持矩阵**（已查证）：
+**平台支持矩阵**（此前 README 声明，平台资格与实机行为待验收）：
 
 | 平台 | 群聊可行性 | 条件 |
 |------|-----------|------|
@@ -227,7 +209,7 @@ identity 概念模型（逻辑层，不再建表）：
 1. **触发模型**：群内默认沉默，仅 @ 她 / 回复她的消息时响应；私聊行为不变。dsh-qq-bridge 的群回复即此模式。
 2. **会话隔离**：每个群 ↔ 一个独立 DSH session（插件天然的 per-conversation 模型），群上下文不与私聊上下文混。
 3. **人设分层**：沿用 dsh-whale-loli v3 的先例——"只在主人面前放开，群聊里收着"。SOUL.md 增加群内行为节：公开场合的亲密度表达上限、不提及私聊内容、对陌生群友的礼貌距离。
-4. **记忆隔离**：群聊日记按 `[QQ群:xxx]` 标注；**群内产生的内容不进 intimate 级记忆**，防泄露边界写入 SOUL.md：她绝不在群里复述私聊内容，也不在私聊里泄露群友隐私。
+4. **记忆隔离**：必须独立工作区和独立记忆服务进程/数据目录，群预设不得访问私聊目录或 MCP；标签仅用于检索而非授权。群聊日记按 `[QQ群:xxx]` 标注；**群内产生的内容不进 intimate 级记忆**，防泄露边界写入 SOUL.md：她绝不在群里复述私聊内容，也不在私聊里泄露群友隐私。
 5. **身份与安全**：群白名单 `allowGroups` 只放行你拉的群；陌生群一律不响应。群内他人 @ 她时按人设礼貌应答但不开工具审批权限（审批码仅私聊有效）。
 6. **上下文预算**：群消息量大，触发式响应 + 独立 session 天然控制了增长；压缩策略同 §6.5。
 
@@ -312,7 +294,7 @@ identity 概念模型（逻辑层，不再建表）：
 | 人设漂移（长对话 OOC） | 体验破坏 | SOUL.md 边界 + 记忆纠错约定；预设内固化关系状态 |
 | 群内隐私泄露（她在群里复述私聊内容） | 信任与隐私破坏 | §8.5 记忆隔离 + SOUL.md 群内边界；上线前用测试群验证 |
 | QQ 机器人账号质感不符预期 | 沉浸感弱 | P0 实测；不可接受则评估 NapCat 真人小号（附录 A） |
-| 隐私（对话含敏感信息） | 数据泄露 | 全链路本机闭环；工作区/配置 600/700 权限 |
+| 隐私（对话含敏感信息） | 数据泄露 | 本地原文库存储；聊天模型和可选云端提炼仍可能传输对话，需确认提供商；工作区/配置 600/700 权限 |
 
 ---
 
@@ -336,3 +318,33 @@ identity 概念模型（逻辑层，不再建表）：
 - dsh-bili-whale（B站通道）: https://github.com/Alterssss/dsh-bili-whale
 - 插件生态索引: https://awesome-dsh-plugin.com/zh/
 - QQ 机器人官方文档: https://bot.q.qq.com/wiki/
+
+
+## 14. v0.7 可行性验证与实际搭建状态（2026-10-27）
+
+当前执行环境为远程 Linux 沙箱 /workspace，未找到 dsh 命令或 ~/.dsh，未连接用户原 Ubuntu。未安装 npm 同名 deepseek-harness 包，该包查询仅返回 0.0.1，不足以认定为目标宿主。
+
+源码快照位于 /workspace/vendor：
+
+| 仓库 | 已核对提交 |
+|---|---|
+| dsh-im-bridge | ef7332e79ff9431845dc4877e79927c9f161fc64 |
+| dsh-qq-bridge | 13a6e1919606d0a28c280e2605a1e39076936675 |
+| DeepSeek-harness-weixin | 361927d701f664074b1ea72096f8e61c121a602d |
+| memlikehuman | f77b57801b591ece2d45b23860674729de4a3642 |
+
+源码证据：QQ src/session/qq-session.ts 按对话创建 session；微信 src/conversations.ts 自管会话；IM packages/im/lib/session-map.js 按 platform/chatId 映射。B站 lib/index.js 当前传入固定 bili-whale，lib/session-delivery.js 可自行 create/轮换，不能视为已共享主人会话。QQ/微信/IM 依赖 rc.6/rc.7 API，记忆压缩插件固定 0.2.1-rc.3，必须针对目标宿主统一版本实测。
+
+已实际完成：
+
+- memlikehuman 安装在 /workspace/vendor/memlikehuman/.venv，未使用全局 Python。
+- 初始化 /workspace/tangguoyuhome/private/memlikehuman，目录权限 700；persona=tangguoyu，project=owner-private。
+- 数据库完整性 ok，零真实消息；未配置任何云端提炼或 embedding API。
+- 人设是上游初始化生成的默认“知伴”，不是用户最终角色；尚未封装 DSH preset。
+- Python 测试：76 passed、1 skipped；宿主桥接测试：8 passed，包括真实 Python 子进程、Cordis flush 和压缩器契约。
+- Ruff lint、格式检查、sdist/wheel 构建通过；无独立 typecheck 命令。
+- 已运行预算恢复检查；未启动常驻服务，MCP stdio 应由目标 DSH 按需拉起。
+
+未完成且不应宣称通过：统一 SessionBinding 实现、目标 DSH 启动、QQ/微信/B站登录和收发、真实模型与实际压缩 E2E、群聊权限隔离。
+
+下一步先确认目标 Ubuntu 的访问路径、dsh --version、Node 版本和实际 profile。不得在未知宿主版本上直接合并补丁或安装所有通道。第 8–13 节保留此前平台资料与路线图；遇到与第 2、3、6.5、7、14 节冲突的旧说法，以这些修订节为准，旧配置命令不能直接视为生产部署命令。

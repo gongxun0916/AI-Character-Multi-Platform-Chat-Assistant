@@ -1,0 +1,22 @@
+{
+  "name": "onebot-reverse-gateway",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24.0.0" },
+  "scripts": {
+    "start": "node main.mts",
+    "test": "node --test test/*.test.mjs",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run lint && npm run typecheck && npm test"
+  },
+  "dependencies": { "ws": "8.18.3" },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.9.3",
+    "eslint": "^9.39.0",
+    "typescript-eslint": "^8.46.0"
+  }
+}
