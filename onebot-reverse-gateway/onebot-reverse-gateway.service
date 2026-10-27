@@ -1,0 +1,33 @@
+[Unit]
+Description=OneBot v11 reverse WebSocket gateway
+After=network.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+WorkingDirectory=/workspace/onebot-reverse-gateway
+ExecStart=/usr/bin/env node /workspace/onebot-reverse-gateway/main.mts /etc/onebot-reverse-gateway/config.json
+Environment=NODE_ENV=production
+EnvironmentFile=/etc/onebot-reverse-gateway/secrets.env
+StateDirectory=onebot-reverse-gateway
+StateDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=200s
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/onebot-reverse-gateway
+
+[Install]
+WantedBy=multi-user.target

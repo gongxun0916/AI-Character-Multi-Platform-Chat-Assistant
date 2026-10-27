@@ -1,0 +1,22 @@
+{
+  "host": "127.0.0.1",
+  "port": 3190,
+  "path": "/onebot/v11/ws",
+  "selfId": "123456789",
+  "owners": ["987654321"],
+  "umo": "onebot-gateway:private:owner",
+  "upstream": "http://127.0.0.1:3188",
+  "stateDir": "/var/lib/onebot-reverse-gateway",
+  "wsTokenEnv": "ONEBOT_WS_TOKEN",
+  "upstreamTokenEnv": "DSH_INGRESS_TOKEN",
+  "maxPayload": 65536,
+  "maxTextBytes": 8192,
+  "maxResponseBytes": 1048576,
+  "maxReplyBytes": 12000,
+  "maxQueue": 16,
+  "maxDedupe": 100000,
+  "turnTimeoutMs": 180000,
+  "controlTimeoutMs": 5000,
+  "sendTimeoutMs": 5000,
+  "heartbeatMs": 30000
+}
